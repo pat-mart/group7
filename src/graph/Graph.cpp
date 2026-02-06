@@ -300,3 +300,111 @@ unsigned long Graph::treewidth(TreeDecompBags& bags) {
 
     return tw - 1;
 }
+
+// algorithm 5
+// takes in road network, returns map holding position and distance arrays for each v in the road network (h2h index struct)
+// first building ancestor array
+// TreeDecompAdj -> matrix of edges in TD. key denotes bag root v, edge to bag root u
+std::unordered_map<unsigned long, std::vector<unsigned long>> Graph::build_ancestor_arrays(const TreeDecompAdj& td_adj, unsigned long root) {
+    std::unordered_map<unsigned long, std::vector<unsigned long>> anc;
+    std::unordered_set<unsigned long> visited;
+    std::queue<unsigned long> q;
+
+    anc[root] = {root};
+    visited.insert(root);
+    q.push(root);
+
+    while (!q.empty()) {
+        unsigned long u = q.front();
+        q.pop();
+
+        for (unsigned long v : td_adj.at(u)) {
+            if (!visited.contains(v)) {
+                visited.insert(v);
+
+                anc[v] = anc[u];
+                anc[v].push_back(v);
+
+                q.push(v);
+            }
+        }
+    }
+
+    return anc;
+}
+
+std::unordered_map<unsigned long, Graph::H2HIndex> Graph::h2h_index() {
+    auto [td_adj, td_bags, root] = get_td();
+
+    auto anc = build_ancestor_arrays(td_adj, root);
+
+    // getting top-down order using BFS
+    std::vector<unsigned long> order;
+    std::unordered_set<unsigned long> visited;
+    std::queue<unsigned long> q;
+
+    visited.insert(root);
+    q.push(root);
+
+    while (!q.empty()) {
+        unsigned long v = q.front(); q.pop();
+        order.push_back(v);
+
+        for (auto u : td_adj[v]) {
+            if (!visited.contains(u)) {
+                visited.insert(u);
+                q.push(u);
+            }
+        }
+    }
+
+    // building h2h index
+    std::unordered_map<unsigned long, H2HIndex> index;
+
+    for (auto v : order) {
+        const auto& bag = td_bags[v];
+        const auto& phi = td_weights[v];
+
+        size_t k = bag.size();
+        size_t l = anc[v].size();
+
+        H2HIndex label;
+        label.pos.resize(k);
+        label.dis.resize(l);
+
+        for (size_t i = 0; i < k; ++i) {
+            unsigned long xi = bag[i];
+
+            auto it = std::find(anc[v].begin(), anc[v].end(), xi);
+            if (it != anc[v].end())
+                label.pos[i] = std::distance(anc[v].begin(), it);
+            else
+                label.pos[i] = l;
+        }
+
+        for (size_t i = 0; i + 1 < l; ++i) {
+            label.dis[i] = std::numeric_limits<unsigned long>::max();
+
+            for (size_t j = 0; j + 1 < k; ++j) {
+                unsigned long d;
+
+                if (label.pos[j] > i) {
+                    d = index[bag[j]].dis[i];
+                } else {
+                    d = index[anc[v][i]].dis[label.pos[j]];
+                }
+
+                if (d != std::numeric_limits<unsigned long>::max())
+                    label.dis[i] = std::min(label.dis[i], static_cast<double>(phi[j] + d));
+            }
+        }
+
+        label.dis[l - 1] = 0;
+
+        index[v] = std::move(label);
+    }
+
+    return index;
+
+}
+

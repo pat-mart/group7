@@ -45,5 +45,20 @@ int main() {
     std::cout << "Tree decomposition time elapsed: " << t.elapsed() << std::endl;
     std::cout << "Treewidth: " << Graph::treewidth(td_bags) << std::endl;
 
-    return 0;
+    t.start();
+    auto h2h_index = graph.h2h_index();
+    t.stop();
+
+    std::cout << "H2H index computation time elapsed: " << t.elapsed() << " seconds" << std::endl;
+
+    for (auto &[bag_id, label] : h2h_index) {
+        std::cout << "Bag " << bag_id << ":\n  Ancestor positions: ";
+        for (auto p : label.pos) std::cout << p << " ";
+        std::cout << "\n  Distances: ";
+        for (auto d : label.dis) std::cout << d << " ";
+        std::cout << "\n\n";
+        
+        static int printed = 0;
+        if (++printed >= 5) break;
+    }
 }

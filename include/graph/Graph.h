@@ -57,6 +57,16 @@ public:
     // returns adj, bags, root of tree decomposition
     std::tuple<TreeDecompAdj, TreeDecompBags, unsigned long> get_td();
 
+    // h2h index for a vertex
+    struct H2HIndex {
+        std::vector<unsigned long> pos;
+        std::vector<double> dis;
+    };
+
+    std::unordered_map<unsigned long, std::vector<unsigned long>> build_ancestor_arrays(const TreeDecompAdj& td_adj, unsigned long root);
+    std::unordered_map<unsigned long, H2HIndex> h2h_index();
+
+
 private:
     AdjMap adj;
     unsigned long num_vertices = 0;
