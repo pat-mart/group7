@@ -47,6 +47,7 @@ public:
     [[nodiscard]] uint32_t h2h_query(uint32_t u, uint32_t v);
     uint32_t get_h2h_size();
     size_t get_treeheight();
+    size_t get_treeheight_r(uint32_t root, uint32_t pred, size_t depth);
 
     void populate_buckets();
     void populate_buckets_min_fill();

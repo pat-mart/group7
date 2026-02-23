@@ -160,8 +160,6 @@ void Graph::clear_buckets() {
 }
 
 // fill := number of 'missing edges' between neighbors to make a clique 
-
-// is it possible to 
 uint32_t Graph::get_fill(uint32_t v) {
     uint32_t fill = 0;
     const auto& neighbors = get_neighbors(v);
@@ -181,9 +179,6 @@ uint32_t Graph::get_fill(uint32_t v) {
 }
 
 void Graph::eliminate_vertex(const uint32_t v, bool is_min_degree) {
-    if(v == 121718) {
-        std::cout << adj.size();
-    }
     const auto& neighbors = get_neighbors(v);
 
     // fills in edges w/ updated weights
@@ -237,6 +232,7 @@ void Graph::eliminate_vertex(const uint32_t v, bool is_min_degree) {
     // updates bucket value of neighbors after edge fill-in
     for (uint32_t neighbor : neighbors) {
         const uint32_t d1 = heuristic_vals[neighbor];
+
         const uint32_t d2 = get_fill(neighbor);
 
         buckets[d1].erase(bucket_position[neighbor]);
@@ -539,6 +535,7 @@ std::tuple<Graph::Pos, Graph::Dis> Graph::get_h2h() {
     return h2h;
 }
 
+// Ask Hector about this -- huge discrepancy between index sizes in RL paper that make me skeptical of results 
 uint32_t Graph::get_h2h_size() {
     const auto& pos = std::get<0>(h2h);
     const auto& dis = std::get<1>(h2h);
@@ -571,5 +568,24 @@ uint32_t Graph::treewidth(TreeDecompBags& bags) {
 }
 
 size_t Graph::get_treeheight() {
-    return treeheight;
+    return get_treeheight_r(td_root, -1, 0);
+}
+
+size_t Graph::get_treeheight_r(uint32_t root, uint32_t pred, size_t depth) {
+    const auto& neighbors = td_adj[root];
+
+    if (neighbors.size() == 1 && pred != -1) { // leaf
+        return depth;
+    }
+
+    const size_t c_depth = depth;
+
+    // height of tree rooted at v_root: current depth + maximum height of all of its children
+    for (const uint32_t neighbor : neighbors) {
+        if(neighbor != pred) {
+            depth = std::max<size_t>(depth, get_treeheight_r(neighbor, root, c_depth+1));
+        }
+    }
+
+    return depth;
 }
