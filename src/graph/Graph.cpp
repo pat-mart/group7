@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <vector>
 #include <cassert>
+#include <algorithm>
 #include <utility>
 #include <algorithm>
 
@@ -23,10 +24,14 @@
 
 Graph::Graph(AdjMap adj, bool populate_buckets) : adj(std::move(adj)) {
     if(populate_buckets) {
-        buckets.resize(10000);
+        buckets.resize(100000);
 
-        heuristic_vals.resize(this->adj.size());
-        bucket_position.resize(this->adj.size());
+        uint32_t max_id = 0;
+        for (const auto& [u, _] : this->adj) {
+            if (u > max_id) max_id = u;
+        }
+        heuristic_vals.resize(max_id + 1);
+        bucket_position.resize(max_id + 1);
     }
 }
 
@@ -37,50 +42,74 @@ Graph Graph::from_mtx(const std::string &path, bool weighted, bool directed) {
         throw std::runtime_error("Could not open file " + path);
     }
 
+    // detect format by extension
+    bool is_edges = path.size() >= 6 && path.substr(path.size() - 6) == ".edges";
+
     std::string line;
-    while (std::getline(in, line)) {
-        if (!line.empty() && line[0] != '%') {
-            break;
-        }
-    }
-
-    if (line.empty()) {
-        throw std::runtime_error("No matrix header found in file " + path);
-    }
-
-    std::istringstream header(line);
-
-    int n, m, nnz;
-    header >> n >> m >> nnz;
-
     AdjMap adj;
 
-    while (std::getline(in, line)) {
-        if (line.empty() || line[0] == '%') continue;
-        std::istringstream iss(line);
+    if (is_edges) {
+        // .edges format: no header, just "u v" pairs, may have # comments, 1-indexed or 0-indexed
+        while (std::getline(in, line)) {
+            if (line.empty() || line[0] == '#' || line[0] == '%') continue;
+            std::istringstream iss(line);
+            uint32_t u, v;
+            if (!(iss >> u >> v)) continue;
+            // assume 1-indexed like mtx
+            u--; v--;
+            adj[u].push_back({v, 1});
+            if (!directed && u != v)
+                adj[v].push_back({u, 1});
+        }
+    } else {
+        // .mtx format: skip comment lines starting with %, first non-comment line is header
+        while (std::getline(in, line)) {
+            if (!line.empty() && line[0] != '%') break;
+        }
 
-        uint32_t u, v;
-        uint32_t w = 1;
-        iss >> u >> v;
-        if (weighted)
-            iss >> w;
+        if (line.empty())
+            throw std::runtime_error("No matrix header found in file " + path);
 
-        u--; v--;
+        std::istringstream header(line);
+        int n, m, nnz;
+        header >> n >> m >> nnz;
 
-        adj[u].push_back({v, w});
-        if (!directed && u != v) {
-            adj[v].push_back({u, w});
+        while (std::getline(in, line)) {
+            if (line.empty() || line[0] == '%') continue;
+            std::istringstream iss(line);
+
+            uint32_t u, v;
+            uint32_t w = 1;
+            iss >> u >> v;
+            if (weighted) iss >> w;
+
+            u--; v--;
+
+            adj[u].push_back({v, w});
+            if (!directed && u != v)
+                adj[v].push_back({u, w});
         }
     }
 
     auto g = Graph(adj, false);
+
+    // count edges: each undirected edge stored twice in adj
+    uint32_t edge_count = 0;
+    uint32_t max_id = 0;
+    for (const auto& [u, edges] : adj) {
+        edge_count += edges.size();
+        if (u > max_id) max_id = u;
+    }
+    g.num_edges = directed ? edge_count : edge_count / 2;
+    g.num_vertices = adj.size();
+    g.max_vertex_id = max_id;
 
     return g;
 }
 
 std::vector<uint32_t> Graph::bfs_traversal(const uint32_t start) {
     std::vector<uint32_t> order;
-    std::vector visited(adj.size(), false);
+    std::vector visited(max_vertex_id + 1, false);
 
     std::queue<uint32_t> q;
     q.push(start);
@@ -135,12 +164,13 @@ void Graph::populate_buckets() {
         //     add_edge_cache(u, to);
         // }
     }
+    min_bucket_hint = 0;
 }
 
 void Graph::populate_buckets_min_fill() {
     for (const auto &[u, edges] : adj) {
         for (const auto& [to, w] : edges) {
-            add_edge_cache(u, to);
+            add_edge_cache(u, to, w);
         }
     }
 
@@ -151,6 +181,101 @@ void Graph::populate_buckets_min_fill() {
         bucket_position[u] = std::prev(buckets[fill_num].end());
         heuristic_vals[u] = fill_num;
     }
+    min_bucket_hint = 0;
+}
+
+std::vector<uint32_t> Graph::get_hybrid_order(float alpha) const {
+    // compute score = alpha*degree + (1-alpha)*fill for each vertex
+    // on the ORIGINAL graph (before any fill-in) — O(V * degree^2) but only done once
+    auto* self = const_cast<Graph*>(this);
+
+    // compute fill once per vertex and store
+    std::vector<std::pair<uint32_t, uint32_t>> deg_fill; // (degree, fill) per vertex
+    deg_fill.reserve(adj.size());
+
+    float max_deg  = 1.0f;
+    float max_fill = 1.0f;
+
+    for (const auto& [u, edges] : adj) {
+        uint32_t deg  = edges.size();
+        uint32_t fill = self->get_fill(u);
+        max_deg  = std::max(max_deg,  (float)deg);
+        max_fill = std::max(max_fill, (float)fill);
+        deg_fill.push_back({deg, fill});
+    }
+
+    // score and collect vertices
+    std::vector<std::pair<float, uint32_t>> scores;
+    scores.reserve(adj.size());
+
+    size_t idx = 0;
+    for (const auto& [u, edges] : adj) {
+        float norm_deg  = deg_fill[idx].first  / max_deg;
+        float norm_fill = deg_fill[idx].second / max_fill;
+        float score = alpha * norm_deg + (1.0f - alpha) * norm_fill;
+        scores.push_back({score, u});
+        idx++;
+    }
+
+    // sort ascending — lowest score eliminated first
+    std::sort(scores.begin(), scores.end());
+
+    std::vector<uint32_t> order;
+    order.reserve(scores.size());
+    for (const auto& [score, v] : scores) {
+        order.push_back(v);
+    }
+    return order;
+}
+
+void Graph::populate_buckets_hybrid(float alpha) {
+    hybrid_alpha = alpha;
+    // populate edge_set and weight_map
+    for (const auto &[u, edges] : adj) {
+        for (const auto& [to, w] : edges) {
+            add_edge_cache(u, to, w);
+        }
+    }
+
+    // large graphs: skip fill (O(V*degree^2) is too slow; fill≈0 on sparse road networks anyway)
+    // small graphs: seed buckets with hybrid score for fill-guided initial priority
+    const bool use_fill = (adj.size() <= 200000);
+
+    if (use_fill) {
+        float max_deg = 1.0f, max_fill = 1.0f;
+        std::vector<uint32_t> fills;
+        fills.reserve(adj.size());
+        for (const auto& [u, edges] : adj) {
+            max_deg = std::max(max_deg, (float)edges.size());
+            uint32_t f = get_fill(u);
+            max_fill = std::max(max_fill, (float)f);
+            fills.push_back(f);
+        }
+        std::vector<std::pair<float, uint32_t>> to_insert;
+        to_insert.reserve(adj.size());
+        size_t idx = 0;
+        for (const auto& [u, edges] : adj) {
+            float nd = edges.size() / max_deg;
+            float nf = fills[idx++] / max_fill;
+            to_insert.push_back({alpha * nd + (1.0f - alpha) * nf, u});
+        }
+        std::sort(to_insert.begin(), to_insert.end());
+        for (auto& [score, u] : to_insert) {
+            uint32_t bucket = (uint32_t)adj.at(u).size();
+            buckets[bucket].push_front(u);
+            bucket_position[u] = buckets[bucket].begin();
+            heuristic_vals[u] = bucket;
+        }
+    } else {
+        // pure degree seeding for large graphs — same as min-degree but adaptive
+        for (const auto& [u, edges] : adj) {
+            uint32_t bucket = (uint32_t)edges.size();
+            buckets[bucket].push_back(u);
+            bucket_position[u] = std::prev(buckets[bucket].end());
+            heuristic_vals[u] = bucket;
+        }
+    }
+    min_bucket_hint = 0;
 }
 
 void Graph::clear_buckets() {
@@ -180,10 +305,7 @@ uint32_t Graph::get_fill(uint32_t v) {
     return fill;
 }
 
-void Graph::eliminate_vertex(const uint32_t v, bool is_min_degree) {
-    if(v == 121718) {
-        std::cout << adj.size();
-    }
+void Graph::eliminate_vertex(const uint32_t v, bool /*is_min_degree*/) {
     const auto& neighbors = get_neighbors(v);
 
     // fills in edges w/ updated weights
@@ -201,16 +323,15 @@ void Graph::eliminate_vertex(const uint32_t v, bool is_min_degree) {
                 adj_u.push_back({w, uvw_weight});
                 adj_w.push_back({u, uvw_weight});
 
-                add_edge_cache(u, w);
-                add_edge_cache(w, u);
+                add_edge_cache(u, w, uvw_weight);
+                add_edge_cache(w, u, uvw_weight);
 
             } else if (uvw_weight < get_edge_weight(u, w)) {
-                // FIXME ?
-                adj_u.erase(std::ranges::find_if((adj)[u], [&](const Edge& e) {return e.to == w;}));
-                adj_w.erase(std::ranges::find_if(adj_w, [&](const Edge& e) {return e.to == u;}));
-
-                adj_u.push_back({w, uvw_weight});
-                adj_w.push_back({u, uvw_weight});
+                // shorter path found — update weight_map in O(1)
+                const uint64_t key_uw = (static_cast<uint64_t>(u) << 32) | static_cast<uint64_t>(w);
+                const uint64_t key_wu = (static_cast<uint64_t>(w) << 32) | static_cast<uint64_t>(u);
+                weight_map[key_uw] = uvw_weight;
+                weight_map[key_wu] = uvw_weight;
             }
         }
     }
@@ -234,15 +355,26 @@ void Graph::eliminate_vertex(const uint32_t v, bool is_min_degree) {
     adj.erase(v);
     num_vertices -= 1;
 
-    // updates bucket value of neighbors after edge fill-in
-    for (uint32_t neighbor : neighbors) {
-        const uint32_t d1 = heuristic_vals[neighbor];
-        const uint32_t d2 = get_fill(neighbor);
+    // updates bucket value of neighbors after edge fill-in (only when using bucket-based heuristics)
+    if (!heuristic_vals.empty()) {
+        for (uint32_t neighbor : neighbors) {
+            const uint32_t d1 = heuristic_vals[neighbor];
+            uint32_t d2;
 
-        buckets[d1].erase(bucket_position[neighbor]);
-        buckets[d2].push_front(neighbor);
-        bucket_position[neighbor] = buckets[d2].begin();
-        heuristic_vals[neighbor] = d2;
+            if (hybrid_alpha > 0.0f && hybrid_alpha < 1.0f) {
+                // hybrid: update by degree only (O(1)) — buckets are raw degree values
+                d2 = adj.at(neighbor).size();
+            } else {
+                // min-fill: recompute fill
+                d2 = get_fill(neighbor);
+            }
+
+            buckets[d1].erase(bucket_position[neighbor]);
+            buckets[d2].push_front(neighbor);
+            bucket_position[neighbor] = buckets[d2].begin();
+            heuristic_vals[neighbor] = d2;
+            if (d2 < min_bucket_hint) min_bucket_hint = d2;
+        }
     }
 }
 
@@ -258,14 +390,12 @@ void Graph::update_bucket(const uint32_t u, const uint32_t heuristic_val) {
 
 // obtains vertex with minimum degree and pops it from its corresponding bucket
 uint32_t Graph::pop_next_vertex() {
-    uint32_t min_bucket = 0;
-
-    while (buckets[min_bucket].empty()) {
-        min_bucket++;
+    while (min_bucket_hint < buckets.size() && buckets[min_bucket_hint].empty()) {
+        min_bucket_hint++;
     }
 
-    const uint32_t v = buckets[min_bucket].front();
-    buckets[min_bucket].pop_front();
+    const uint32_t v = buckets[min_bucket_hint].front();
+    buckets[min_bucket_hint].pop_front();
 
     return v;
 }
@@ -277,31 +407,120 @@ bool Graph::edge_exists(const uint32_t u, const uint32_t v) const {
 
 uint32_t Graph::get_edge_weight(const uint32_t u, const uint32_t v) const {
     if (u == v) return 0;
-
-    for (const Edge& e : adj.at(u)) {
-        if (e.to == v) return e.w;
+    const uint64_t key = (static_cast<uint64_t>(u) << 32) | static_cast<uint64_t>(v);
+    auto it = weight_map.find(key);
+    if (it != weight_map.end()) return it->second;
+    // fallback: weight_map not populated on this graph (e.g. oracle graph), scan adj
+    auto ait = adj.find(u);
+    if (ait != adj.end()) {
+        for (const Edge& e : ait->second) {
+            if (e.to == v) return e.w;
+        }
     }
-
     return UINT32_MAX;
 }
 
-void Graph::add_edge_cache(const uint32_t u, const uint32_t v) {
+void Graph::add_edge_cache(const uint32_t u, const uint32_t v, const uint32_t w) {
     // first 32 bits encode u (first shifted left 32 bits), last 32 bits encode v
     const uint64_t edge_cache = (static_cast<uint64_t>(u) << 32) | static_cast<uint64_t>(v);
 
     edge_set.insert(edge_cache);
+    weight_map[edge_cache] = w;
 }
 
 void Graph::remove_edge_cache(const uint32_t u, const uint32_t v) {
     const uint64_t edge_cache = (static_cast<uint64_t>(u) << 32) | static_cast<uint64_t>(v);
 
     edge_set.erase(edge_cache);
+    weight_map.erase(edge_cache);
 }
+
+
+
+// Lexicographic BFS
+// Reversing the result gives a good elimination ordering for sparse graphs.
+// Time complexity: O(V + E)
+std::vector<uint32_t> Graph::lex_bfs() const {
+    const size_t n = max_vertex_id + 1;
+    const size_t num_verts = adj.size();
+
+    // Partition refinement using a linked list of partitions.
+    // Each partition is a list of vertices. We maintain iterators so
+    // insertion before a given partition is O(1).
+
+    struct Partition { std::list<uint32_t> verts; };
+    std::list<Partition> plist;
+    plist.push_back({});
+
+    using PIt   = std::list<Partition>::iterator;
+    using VtxIt = std::list<uint32_t>::iterator;
+
+    std::vector<PIt>    part_of(n, plist.end());
+    std::vector<VtxIt>  pos_in(n);
+
+    for (const auto& [u, _] : adj) {
+        plist.front().verts.push_back(u);
+        pos_in[u]  = std::prev(plist.front().verts.end());
+        part_of[u] = plist.begin();
+    }
+
+    std::vector<uint32_t> order;
+    order.reserve(num_verts);
+    std::vector<bool> visited(n, false);
+
+    // new_sib[v] stores the new partition inserted before part_of[v] this round.
+    // We use a raw pointer as a key: null means "not yet split this round".
+    // Reset via a touched list so we never scan all partitions.
+    std::unordered_map<Partition*, PIt> new_sib;
+    new_sib.reserve(64);
+
+    for (size_t i = 0; i < num_verts; i++) {
+        // skip empty partitions at the front
+        while (!plist.empty() && plist.front().verts.empty())
+            plist.pop_front();
+
+        const uint32_t v = plist.front().verts.front();
+        plist.front().verts.pop_front();
+        visited[v] = true;
+        order.push_back(v);
+
+        new_sib.clear();
+
+        for (const auto& [u, w] : adj.at(v)) {
+            if (visited[u]) continue;
+
+            PIt cur = part_of[u];
+            Partition* key = &(*cur);
+
+            auto sit = new_sib.find(key);
+            if (sit == new_sib.end()) {
+                // insert a fresh partition just before cur — O(1)
+                PIt ins = plist.insert(cur, Partition{});
+                sit = new_sib.emplace(key, ins).first;
+            }
+
+            PIt np = sit->second;
+            cur->verts.erase(pos_in[u]);
+            np->verts.push_back(u);
+            pos_in[u]  = std::prev(np->verts.end());
+            part_of[u] = np;
+        }
+
+        // remove empty source partitions
+        for (auto& [key, it] : new_sib) {
+            (void)key;
+            if (it->verts.empty()) plist.erase(it);
+        }
+    }
+
+    return order;
+}
+
 
 // DNF in reasonable amount of time even on very small graph
 std::vector<uint32_t> Graph::get_random_ordering() const {
-    std::vector<uint32_t> ordering(adj.size());
-    for (uint32_t u = 0; u < adj.size(); u++) {
+    std::vector<uint32_t> ordering(max_vertex_id + 1);
+    for (uint32_t u = 0; u <= max_vertex_id; u++) {
         ordering[u] = u;
     }
 
@@ -311,38 +530,87 @@ std::vector<uint32_t> Graph::get_random_ordering() const {
     return ordering;
 }
 
-std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td() {
-    Graph h = Graph(adj, true);
+std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(Heuristic heuristic, float alpha) {
+    bool needs_buckets = (heuristic != Heuristic::LEX_BFS);
+    Graph h = Graph(adj, needs_buckets);
+    h.max_vertex_id = max_vertex_id;
+    h.hybrid_alpha = 0.0f; // reset; will be set by populate_buckets_hybrid if needed
 
-    const auto adj_size = adj.size();
+    const auto adj_size = max_vertex_id + 1;
 
-    h.num_vertices = adj_size;
-    // h.populate_buckets();
-    h.populate_buckets_min_fill();
+    h.num_vertices = adj.size();
+    h.adj_original_size = adj.size();
+    // norm_max_deg and norm_max_fill are set inside populate_buckets_hybrid on h directly
+
+    if (heuristic == Heuristic::MIN_FILL) {
+        h.populate_buckets_min_fill();
+    } else if (heuristic == Heuristic::MIN_DEGREE) {
+        for (const auto& [u, edges] : adj) {
+            for (const auto& [to, w] : edges) {
+                h.add_edge_cache(u, to, w);
+            }
+        }
+        h.populate_buckets();
+    } else if (heuristic == Heuristic::HYBRID) {
+        h.populate_buckets_hybrid(alpha);
+    } else {
+        // LEX_BFS: populate edge_set only
+        for (const auto& [u, edges] : adj) {
+            for (const auto& [to, w] : edges) {
+                h.add_edge_cache(u, to, w);
+            }
+        }
+    }
+
     h.td_bag_edges.resize(adj_size);
 
-    std::vector<uint32_t> ordering(adj_size);
-    parent_map.resize(adj_size);
+    std::vector<uint32_t> ordering(adj_size, UINT32_MAX); // UINT32_MAX = not yet eliminated
+    parent_map.assign(adj_size, UINT32_MAX); // UINT32_MAX = no parent (isolated vertex)
 
     td_bag_edges.resize(adj_size);
     td_weights.resize(adj_size);
 
     td_bags.clear();
     td_adj.clear();
+    treeheight = 0;
+    td_root = 1e9;
 
     td_adj.resize(adj_size);
     td_bags.resize(adj_size);
 
-    for (size_t i = 0; i < adj.size(); i++) {
-        uint32_t v = h.pop_next_vertex();
+    if (heuristic == Heuristic::LEX_BFS) {
+        std::vector<uint32_t> elim_order = h.lex_bfs();
+        std::ranges::reverse(elim_order);
 
-        td_bags[v] = h.get_star(v);
-        h.eliminate_vertex(v, true);
+        for (size_t i = 0; i < elim_order.size(); i++) {
+            uint32_t v = elim_order[i];
+            td_bags[v] = h.get_star(v);
+            h.eliminate_vertex(v, false);
+            ordering[v] = i;
 
-        ordering[v] = i;
+            if (i % static_cast<int>(adj.size() / 10) == 0)
+                std::cout << "Eliminated vertex " << i << " " << 10 * i / static_cast<int>(adj.size() / 10) << "%" << std::endl;
+        }
+    } else if (heuristic == Heuristic::HYBRID) {
+        // adaptive: seeded with hybrid score, updates by degree only (O(degree) per step)
+        for (size_t i = 0; i < adj.size(); i++) {
+            uint32_t v = h.pop_next_vertex();
+            td_bags[v] = h.get_star(v);
+            h.eliminate_vertex(v, false);
+            ordering[v] = i;
 
-        if (i % static_cast<int>(num_vertices / 10) == 0) {
-            std::cout << "Eliminated vertex " << i << " " << 10 * i / static_cast<int>(num_vertices / 10) << "%" << std::endl;
+            if (i % static_cast<int>(adj.size() / 10) == 0)
+                std::cout << "Eliminated vertex " << i << " " << 10 * i / static_cast<int>(adj.size() / 10) << "%" << std::endl;
+        }
+    } else {
+        for (size_t i = 0; i < adj.size(); i++) {
+            uint32_t v = h.pop_next_vertex();
+            td_bags[v] = h.get_star(v);
+            h.eliminate_vertex(v, false);
+            ordering[v] = i;
+
+            if (i % static_cast<int>(adj.size() / 10) == 0)
+                std::cout << "Eliminated vertex " << i << " " << 10 * i / static_cast<int>(adj.size() / 10) << "%" << std::endl;
         }
     }
 
@@ -360,7 +628,8 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
         }
 
         if (best == UINT32_MAX) {
-            td_root = v;
+            // only set td_root if not already set (HYBRID sets it explicitly before this loop)
+            if (td_root == static_cast<uint32_t>(1e9)) td_root = v;
             parent_map[v] = v;
             continue;
         }
@@ -371,7 +640,7 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
         parent_map[v] = min_u;
     }
 
-    for (size_t v = 0; v < td_bags.size(); v++) {
+    for (uint32_t v : adj | std::views::keys) {
 
         auto& bag = td_bags[v];
 
@@ -434,9 +703,9 @@ std::vector<uint32_t> Graph::get_bag_path(const uint32_t v) const {
 
     uint32_t current = v;
     while (current != td_root) {
-        path.push_back(current);
-        
         uint32_t parent = parent_map[current];
+        if (parent == UINT32_MAX || parent == current) break; // isolated/invalid vertex
+        path.push_back(current);
         current = parent;
     }
     
