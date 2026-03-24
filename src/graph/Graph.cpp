@@ -103,6 +103,7 @@ Graph Graph::from_mtx(const std::string &path, bool weighted, bool directed) {
     g.num_edges = directed ? edge_count : edge_count / 2;
     g.num_vertices = adj.size();
     g.max_vertex_id = max_id;
+    g.weighted_graph = weighted;
 
     return g;
 }
@@ -159,10 +160,6 @@ void Graph::populate_buckets() {
         buckets[deg].push_back(u);
         bucket_position[u] = std::prev(buckets[deg].end());
         heuristic_vals[u] = deg;
-
-        // for (const auto&[to, w] : edges) {
-        //     add_edge_cache(u, to);
-        // }
     }
     min_bucket_hint = 0;
 }
@@ -185,12 +182,9 @@ void Graph::populate_buckets_min_fill() {
 }
 
 std::vector<uint32_t> Graph::get_hybrid_order(float alpha) const {
-    // compute score = alpha*degree + (1-alpha)*fill for each vertex
-    // on the ORIGINAL graph (before any fill-in) — O(V * degree^2) but only done once
     auto* self = const_cast<Graph*>(this);
 
-    // compute fill once per vertex and store
-    std::vector<std::pair<uint32_t, uint32_t>> deg_fill; // (degree, fill) per vertex
+    std::vector<std::pair<uint32_t, uint32_t>> deg_fill;
     deg_fill.reserve(adj.size());
 
     float max_deg  = 1.0f;
@@ -204,7 +198,6 @@ std::vector<uint32_t> Graph::get_hybrid_order(float alpha) const {
         deg_fill.push_back({deg, fill});
     }
 
-    // score and collect vertices
     std::vector<std::pair<float, uint32_t>> scores;
     scores.reserve(adj.size());
 
@@ -217,7 +210,6 @@ std::vector<uint32_t> Graph::get_hybrid_order(float alpha) const {
         idx++;
     }
 
-    // sort ascending — lowest score eliminated first
     std::sort(scores.begin(), scores.end());
 
     std::vector<uint32_t> order;
@@ -280,13 +272,9 @@ void Graph::populate_buckets_hybrid(float alpha) {
 
 void Graph::clear_buckets() {
     buckets.clear();
-    
     heuristic_vals.clear();
 }
 
-// fill := number of 'missing edges' between neighbors to make a clique 
-
-// is it possible to 
 uint32_t Graph::get_fill(uint32_t v) {
     uint32_t fill = 0;
     const auto& neighbors = get_neighbors(v);
@@ -343,7 +331,6 @@ void Graph::eliminate_vertex(const uint32_t v, bool /*is_min_degree*/) {
     }
     td_bag_edges[v].push_back({v, 0});
 
-
     // removes any outward edges from neighbors to vertex
     for (const auto& neighbor : neighbors) {
         remove_edge_cache(neighbor, v);
@@ -388,7 +375,6 @@ void Graph::update_bucket(const uint32_t u, const uint32_t heuristic_val) {
     heuristic_vals[u] = new_bucket;
 }
 
-// obtains vertex with minimum degree and pops it from its corresponding bucket
 uint32_t Graph::pop_next_vertex() {
     while (min_bucket_hint < buckets.size() && buckets[min_bucket_hint].empty()) {
         min_bucket_hint++;
@@ -407,10 +393,14 @@ bool Graph::edge_exists(const uint32_t u, const uint32_t v) const {
 
 uint32_t Graph::get_edge_weight(const uint32_t u, const uint32_t v) const {
     if (u == v) return 0;
+    // for unweighted graphs, just check edge_set — avoids weight_map memory overhead
+    if (!weighted_graph) {
+        return edge_exists(u, v) ? 1 : UINT32_MAX;
+    }
     const uint64_t key = (static_cast<uint64_t>(u) << 32) | static_cast<uint64_t>(v);
     auto it = weight_map.find(key);
     if (it != weight_map.end()) return it->second;
-    // fallback: weight_map not populated on this graph (e.g. oracle graph), scan adj
+    // fallback: scan adj
     auto ait = adj.find(u);
     if (ait != adj.end()) {
         for (const Edge& e : ait->second) {
@@ -421,32 +411,21 @@ uint32_t Graph::get_edge_weight(const uint32_t u, const uint32_t v) const {
 }
 
 void Graph::add_edge_cache(const uint32_t u, const uint32_t v, const uint32_t w) {
-    // first 32 bits encode u (first shifted left 32 bits), last 32 bits encode v
     const uint64_t edge_cache = (static_cast<uint64_t>(u) << 32) | static_cast<uint64_t>(v);
-
     edge_set.insert(edge_cache);
-    weight_map[edge_cache] = w;
+    if (weighted_graph) weight_map[edge_cache] = w;
 }
 
 void Graph::remove_edge_cache(const uint32_t u, const uint32_t v) {
     const uint64_t edge_cache = (static_cast<uint64_t>(u) << 32) | static_cast<uint64_t>(v);
-
     edge_set.erase(edge_cache);
-    weight_map.erase(edge_cache);
+    if (weighted_graph) weight_map.erase(edge_cache);
 }
 
-
-
 // Lexicographic BFS
-// Reversing the result gives a good elimination ordering for sparse graphs.
-// Time complexity: O(V + E)
 std::vector<uint32_t> Graph::lex_bfs() const {
     const size_t n = max_vertex_id + 1;
     const size_t num_verts = adj.size();
-
-    // Partition refinement using a linked list of partitions.
-    // Each partition is a list of vertices. We maintain iterators so
-    // insertion before a given partition is O(1).
 
     struct Partition { std::list<uint32_t> verts; };
     std::list<Partition> plist;
@@ -468,14 +447,10 @@ std::vector<uint32_t> Graph::lex_bfs() const {
     order.reserve(num_verts);
     std::vector<bool> visited(n, false);
 
-    // new_sib[v] stores the new partition inserted before part_of[v] this round.
-    // We use a raw pointer as a key: null means "not yet split this round".
-    // Reset via a touched list so we never scan all partitions.
     std::unordered_map<Partition*, PIt> new_sib;
     new_sib.reserve(64);
 
     for (size_t i = 0; i < num_verts; i++) {
-        // skip empty partitions at the front
         while (!plist.empty() && plist.front().verts.empty())
             plist.pop_front();
 
@@ -494,7 +469,6 @@ std::vector<uint32_t> Graph::lex_bfs() const {
 
             auto sit = new_sib.find(key);
             if (sit == new_sib.end()) {
-                // insert a fresh partition just before cur — O(1)
                 PIt ins = plist.insert(cur, Partition{});
                 sit = new_sib.emplace(key, ins).first;
             }
@@ -506,7 +480,6 @@ std::vector<uint32_t> Graph::lex_bfs() const {
             part_of[u] = np;
         }
 
-        // remove empty source partitions
         for (auto& [key, it] : new_sib) {
             (void)key;
             if (it->verts.empty()) plist.erase(it);
@@ -516,8 +489,6 @@ std::vector<uint32_t> Graph::lex_bfs() const {
     return order;
 }
 
-
-// DNF in reasonable amount of time even on very small graph
 std::vector<uint32_t> Graph::get_random_ordering() const {
     std::vector<uint32_t> ordering(max_vertex_id + 1);
     for (uint32_t u = 0; u <= max_vertex_id; u++) {
@@ -534,13 +505,13 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
     bool needs_buckets = (heuristic != Heuristic::LEX_BFS);
     Graph h = Graph(adj, needs_buckets);
     h.max_vertex_id = max_vertex_id;
-    h.hybrid_alpha = 0.0f; // reset; will be set by populate_buckets_hybrid if needed
+    h.hybrid_alpha = 0.0f;
+    h.weighted_graph = weighted_graph;
 
     const auto adj_size = max_vertex_id + 1;
 
     h.num_vertices = adj.size();
     h.adj_original_size = adj.size();
-    // norm_max_deg and norm_max_fill are set inside populate_buckets_hybrid on h directly
 
     if (heuristic == Heuristic::MIN_FILL) {
         h.populate_buckets_min_fill();
@@ -564,8 +535,8 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
 
     h.td_bag_edges.resize(adj_size);
 
-    std::vector<uint32_t> ordering(adj_size, UINT32_MAX); // UINT32_MAX = not yet eliminated
-    parent_map.assign(adj_size, UINT32_MAX); // UINT32_MAX = no parent (isolated vertex)
+    std::vector<uint32_t> ordering(adj_size, UINT32_MAX);
+    parent_map.assign(adj_size, UINT32_MAX);
 
     td_bag_edges.resize(adj_size);
     td_weights.resize(adj_size);
@@ -592,7 +563,6 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
                 std::cout << "Eliminated vertex " << i << " " << 10 * i / static_cast<int>(adj.size() / 10) << "%" << std::endl;
         }
     } else if (heuristic == Heuristic::HYBRID) {
-        // adaptive: seeded with hybrid score, updates by degree only (O(degree) per step)
         for (size_t i = 0; i < adj.size(); i++) {
             uint32_t v = h.pop_next_vertex();
             td_bags[v] = h.get_star(v);
@@ -628,7 +598,6 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
         }
 
         if (best == UINT32_MAX) {
-            // only set td_root if not already set (HYBRID sets it explicitly before this loop)
             if (td_root == static_cast<uint32_t>(1e9)) td_root = v;
             parent_map[v] = v;
             continue;
@@ -641,7 +610,6 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
     }
 
     for (uint32_t v : adj | std::views::keys) {
-
         auto& bag = td_bags[v];
 
         std::ranges::sort(bag, [&](const uint32_t a, const uint32_t b) {return ordering[a] > ordering[b];});
@@ -654,7 +622,6 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
         const auto& edges = h.td_bag_edges.at(v);
 
         for (const uint32_t u : bag) {
-            
             for (const auto&[to, w] : edges) {
                 if (to == u && u != v) {
                     td_weights[v].push_back(w);
@@ -663,6 +630,26 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
         }
 
         td_weights[v].push_back(0);
+    }
+
+    // compute treeheight via BFS from root on td_adj — works for all heuristics, no H2H needed
+    if (td_root != static_cast<uint32_t>(1e9)) {
+        std::queue<std::pair<uint32_t, uint32_t>> bfs_q; // (node, depth)
+        std::unordered_set<uint32_t> bfs_visited;
+        bfs_q.push({td_root, 0});
+        bfs_visited.insert(td_root);
+        treeheight = 0;
+        while (!bfs_q.empty()) {
+            auto [node, depth] = bfs_q.front();
+            bfs_q.pop();
+            treeheight = std::max(treeheight, (size_t)depth);
+            for (uint32_t neighbor : td_adj.at(node)) {
+                if (!bfs_visited.contains(neighbor)) {
+                    bfs_visited.insert(neighbor);
+                    bfs_q.push({neighbor, depth + 1});
+                }
+            }
+        }
     }
 
     return {td_adj, td_bags, td_root};
@@ -704,14 +691,14 @@ std::vector<uint32_t> Graph::get_bag_path(const uint32_t v) const {
     uint32_t current = v;
     while (current != td_root) {
         uint32_t parent = parent_map[current];
-        if (parent == UINT32_MAX || parent == current) break; // isolated/invalid vertex
+        if (parent == UINT32_MAX || parent == current) break;
         path.push_back(current);
         current = parent;
     }
-    
+
     path.push_back(td_root);
     std::ranges::reverse(path);
-    
+
     return path;
 }
 
@@ -769,10 +756,8 @@ std::tuple<Graph::Pos, Graph::Dis> Graph::get_h2h() {
 
     for (const uint32_t v_bag : ordering) {
         const auto& anc = get_bag_path(v_bag);
-        auto& bag = td_bags.at(v_bag); 
+        auto& bag = td_bags.at(v_bag);
 
-        treeheight = std::max(anc.size(), treeheight) - 1;
-    
         for (const uint32_t bag_vertex : bag) {
             auto bag_pos_i = index_of(anc, bag_vertex);
             pos[v_bag].push_back(bag_pos_i);
@@ -825,7 +810,6 @@ uint32_t Graph::get_h2h_size() {
 
     return pos_sum + dis_sum;
 }
-
 
 uint32_t Graph::treewidth(TreeDecompBags& bags) {
     uint32_t tw = 0;

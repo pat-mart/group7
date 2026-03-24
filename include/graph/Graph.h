@@ -91,6 +91,7 @@ public:
     float norm_max_deg  = 1.0f;
     float norm_max_fill = 1.0f;
     uint32_t min_bucket_hint = 0;
+    bool weighted_graph = false;  // if false, weight_map is skipped to save memory
 
 private:
     AdjMap adj{};
