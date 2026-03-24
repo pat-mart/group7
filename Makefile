@@ -2,7 +2,7 @@
 # Compiler & flags
 # ========================
 CXX       := g++
-CXXFLAGS  := -march=native -mtune=native -flto -g -DDEBUG \
+CXXFLAGS  := -march=native -mtune=native -flto -O3 -DNDEBUG \
              -std=c++20 -Wall -Wextra -Wpedantic 
 INCLUDES  := -Iinclude
 LDFLAGS   := -flto

@@ -793,6 +793,7 @@ std::tuple<Graph::Pos, Graph::Dis> Graph::get_h2h() {
     return h2h;
 }
 
+// Ask Hector about this -- huge discrepancy between index sizes in RL paper that make me skeptical of results 
 uint32_t Graph::get_h2h_size() {
     const auto& pos = std::get<0>(h2h);
     const auto& dis = std::get<1>(h2h);
