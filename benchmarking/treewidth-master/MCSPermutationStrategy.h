@@ -2,30 +2,43 @@
 #define MCSPermutationStrategy_h
 
 #include <unordered_set>
-
 #include "PermutationStrategy.h"
 
-//Implements the Maximum Cardinality Search permutation stategy
-// - at each step, the node with the largest number of already visited nodes
-//    is chosen
-class MCSPermutationStrategy: public PermutationStrategy{
+// Implements Maximum Cardinality Search permutation strategy
+// At each step: pick vertex with largest number of already
+// eliminated neighbors.
+
+class MCSPermutationStrategy : public PermutationStrategy {
+
 public:
-  void recompute(std::unordered_set<unsigned long>, Graph& graph){
-    for(auto node:graph.get_nodes()){
-      node_type nstruct;
-      nstruct.id = node;
-      nstruct.val = (*queue_nodes[node]).val-1;
-      queue_nodes[node]=queue.push(nstruct);
+
+  // Recompute weights after selecting a node
+  void recompute(std::unordered_set<unsigned long> eliminated,
+                 Graph& graph,
+                 unsigned long selected_node)
+  {
+    // Increase weight of each uneliminated neighbor
+    for (auto neighbor : graph.get_neighbors(selected_node)) {
+
+      if (eliminated.count(neighbor) == 0) {
+
+        node_type nstruct;
+        nstruct.id  = neighbor;
+        nstruct.val = (*queue_nodes[neighbor]).val + 1;
+
+        queue_nodes[neighbor] = queue.push(nstruct);
+      }
     }
   }
-  
+
 protected:
-  //This is only useful for the initial phase, for initializing the heap
-  unsigned long compute_statistic(unsigned long, Graph& graph,\
-                                  bool init=false){
-    unsigned long rtval = 0;
-    if(init) rtval = graph.number_nodes();
-    return rtval;
+
+  // Initial statistic = 0 for all nodes
+  unsigned long compute_statistic(unsigned long,
+                                  Graph&,
+                                  bool init = false)
+  {
+    return 0;
   }
 };
 

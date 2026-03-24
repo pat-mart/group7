@@ -35,11 +35,22 @@ public:
 
     [[nodiscard]] std::vector<uint32_t> bfs_traversal(uint32_t start);
     uint32_t get_num_vertices() const {
-        return num_vertices;
+        return max_vertex_id + 1;
     }
 
+    uint32_t get_num_edges() const {
+        return num_edges;
+    }
+
+    double get_avg_degree() const {
+        if (num_vertices == 0) return 0.0;
+        return (2.0 * num_edges) / num_vertices;
+    }
+
+    enum class Heuristic { MIN_DEGREE, MIN_FILL, LEX_BFS, HYBRID };
+
     // returns adj, bags, root of tree decomposition
-    std::tuple<TreeDecompAdj, TreeDecompBags, uint32_t> get_td();
+    std::tuple<TreeDecompAdj, TreeDecompBags, uint32_t> get_td(Heuristic h = Heuristic::MIN_FILL, float alpha = 0.5f);
 
     std::tuple<Pos, Dis> get_h2h();
     [[nodiscard]] std::vector<uint32_t> get_top_down_ordering() const;
@@ -51,6 +62,7 @@ public:
 
     void populate_buckets();
     void populate_buckets_min_fill();
+    void populate_buckets_hybrid(float alpha);
     void clear_buckets();
     uint32_t get_fill(uint32_t u);
 
@@ -63,12 +75,24 @@ public:
     [[nodiscard]] std::vector<uint32_t> get_neighbors(uint32_t vertex) const;
     [[nodiscard]] uint32_t get_edge_weight(uint32_t u, uint32_t v) const;
 
-    void add_edge_cache(uint32_t u, uint32_t v);
+    void add_edge_cache(uint32_t u, uint32_t v, uint32_t w = 1);
     void remove_edge_cache(uint32_t u, uint32_t v);
 
     [[nodiscard]] std::vector<uint32_t> get_random_ordering() const;
+
+    // Lexicographic BFS: returns vertices in LexBFS visit order.
+    // Produces better elimination orderings than MCS on non-chordal graphs.
+    [[nodiscard]] std::vector<uint32_t> lex_bfs() const;
+    [[nodiscard]] std::vector<uint32_t> get_hybrid_order(float alpha) const;
     uint32_t num_vertices = 0;
     uint32_t num_edges = 0;
+    uint32_t max_vertex_id = 0;
+    float hybrid_alpha = 0.0f;
+    uint32_t adj_original_size = 0;
+    float norm_max_deg  = 1.0f;
+    float norm_max_fill = 1.0f;
+    uint32_t min_bucket_hint = 0;
+    bool weighted_graph = false;  // if false, weight_map is skipped to save memory
 
 private:
     AdjMap adj{};
@@ -82,18 +106,20 @@ private:
     std::vector<uint32_t> parent_map;
 
     uint32_t td_root = 1e9;
-    size_t treeheight;
+    size_t treeheight = 0;
 
-    float avg_degree;
+    float avg_degree = 0.0f;
     std::vector<std::vector<uint32_t>> vertex_betweenness;
 
     std::tuple<Pos, Dis> h2h;
 
     std::unordered_set<uint64_t> edge_set;
+    std::unordered_map<uint64_t, uint32_t> weight_map;
 
     std::vector<std::list<uint32_t>> buckets;
     std::vector<uint32_t> heuristic_vals;
     std::vector<std::list<uint32_t>::iterator> bucket_position;
+    std::vector<uint32_t> fill_count; // incremental fill count per vertex for hybrid
 
     static uint32_t index_of(const std::vector<uint32_t>&, uint32_t v);
 

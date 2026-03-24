@@ -13,7 +13,8 @@ LDFLAGS   := -flto
 SRC_DIR   := src
 INC_DIR   := include
 BUILD_DIR := build
-BIN       := app
+OUT_DIR	  := out
+BIN       := $(OUT_DIR)/app
 
 # ========================
 # Files
@@ -27,7 +28,10 @@ DEPS := $(OBJS:.o=.d)
 # ========================
 all: $(BIN)
 
-$(BIN): $(OBJS)
+$(OUT_DIR):
+	mkdir -p $(OUT_DIR)
+
+$(BIN): $(OBJS) | $(OUT_DIR)
 	$(CXX) $(OBJS) -o $@ $(LDFLAGS)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
@@ -35,7 +39,7 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
 
 clean:
-	rm -rf $(BUILD_DIR) $(BIN)
+	rm -rf $(BUILD_DIR) $(OUT_DIR)
 
 rebuild: clean all
 
