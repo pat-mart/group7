@@ -387,6 +387,16 @@ uint32_t Graph::pop_next_vertex() {
 }
 
 bool Graph::edge_exists(const uint32_t u, const uint32_t v) const {
+    if (!weighted_graph) {
+        // unweighted: scan adj directly — saves ~1GB of edge_set memory
+        // avg degree ~2 on road networks so this is O(1) in practice
+        auto it = adj.find(u);
+        if (it == adj.end()) return false;
+        for (const Edge& e : it->second) {
+            if (e.to == v) return true;
+        }
+        return false;
+    }
     const uint64_t edge = (static_cast<uint64_t>(u) << 32) | static_cast<uint64_t>(v);
     return edge_set.contains(edge);
 }
@@ -411,15 +421,21 @@ uint32_t Graph::get_edge_weight(const uint32_t u, const uint32_t v) const {
 }
 
 void Graph::add_edge_cache(const uint32_t u, const uint32_t v, const uint32_t w) {
-    const uint64_t edge_cache = (static_cast<uint64_t>(u) << 32) | static_cast<uint64_t>(v);
-    edge_set.insert(edge_cache);
-    if (weighted_graph) weight_map[edge_cache] = w;
+    if (weighted_graph) {
+        const uint64_t edge_cache = (static_cast<uint64_t>(u) << 32) | static_cast<uint64_t>(v);
+        edge_set.insert(edge_cache);
+        weight_map[edge_cache] = w;
+    }
+    // unweighted: skip edge_set entirely — edge_exists scans adj directly
 }
 
 void Graph::remove_edge_cache(const uint32_t u, const uint32_t v) {
-    const uint64_t edge_cache = (static_cast<uint64_t>(u) << 32) | static_cast<uint64_t>(v);
-    edge_set.erase(edge_cache);
-    if (weighted_graph) weight_map.erase(edge_cache);
+    if (weighted_graph) {
+        const uint64_t edge_cache = (static_cast<uint64_t>(u) << 32) | static_cast<uint64_t>(v);
+        edge_set.erase(edge_cache);
+        weight_map.erase(edge_cache);
+    }
+    // unweighted: nothing to do — edge_exists uses adj directly
 }
 
 // Lexicographic BFS
@@ -535,7 +551,7 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
 
     h.td_bag_edges.resize(adj_size);
 
-    std::vector<uint32_t> ordering(adj_size, UINT32_MAX);
+    std::vector<uint32_t> ordering(adj_size, UINT32_MAX); // indexed by compact ID
     parent_map.assign(adj_size, UINT32_MAX);
 
     td_bag_edges.resize(adj_size);
@@ -605,7 +621,6 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
 
         td_adj[v].push_back(min_u);
         td_adj[min_u].push_back(v);
-
         parent_map[v] = min_u;
     }
 
@@ -632,9 +647,9 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
         td_weights[v].push_back(0);
     }
 
-    // compute treeheight via BFS from root on td_adj — works for all heuristics, no H2H needed
+    // compute treeheight via BFS from root on td_adj
     if (td_root != static_cast<uint32_t>(1e9)) {
-        std::queue<std::pair<uint32_t, uint32_t>> bfs_q; // (node, depth)
+        std::queue<std::pair<uint32_t, uint32_t>> bfs_q;
         std::unordered_set<uint32_t> bfs_visited;
         bfs_q.push({td_root, 0});
         bfs_visited.insert(td_root);
@@ -651,6 +666,11 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
             }
         }
     }
+
+    // free temporary structures to reduce peak memory
+    { TreeDecompBagEdges tmp; h.td_bag_edges.swap(tmp); }
+    td_bag_edges.clear(); td_bag_edges.shrink_to_fit();
+    td_weights.clear(); td_weights.shrink_to_fit();
 
     return {td_adj, td_bags, td_root};
 }
@@ -793,7 +813,6 @@ std::tuple<Graph::Pos, Graph::Dis> Graph::get_h2h() {
     return h2h;
 }
 
-// Ask Hector about this -- huge discrepancy between index sizes in RL paper that make me skeptical of results 
 uint32_t Graph::get_h2h_size() {
     const auto& pos = std::get<0>(h2h);
     const auto& dis = std::get<1>(h2h);
