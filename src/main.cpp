@@ -17,10 +17,10 @@ int main() {
     auto t = Timer();
 
     std::vector<std::string> file_paths = {
-         "mtx/road-minnesota.mtx",
+        // "mtx/road-minnesota.mtx",
         // "mtx/road-usroads-48.mtx",
-         "mtx/road-belgium-osm.mtx",
-        // "mtx/road-germany-osm.mtx",
+        // "mtx/road-belgium-osm.mtx",
+         "mtx/road-germany-osm.mtx",
         // "mtx/road-great-britain-osm.mtx",
         // "mtx/road-italy-osm.edges",
         // "mtx/road-netherlands-osm.mtx",
@@ -48,13 +48,13 @@ int main() {
         std::cout << "\n=== " << name << " ===" << std::endl;
 
         Graph size_probe = Graph::from_mtx(path, false, false);
-        bool run_h2h = size_probe.num_vertices <= 200000;
+        bool run_h2h = false; // H2H disabled — not needed for hybrid poster results
 
         const std::unordered_map<std::string, std::vector<float>> alpha_map = {
-             {"road-minnesota",       {0.2f, 0.4f, 0.6f, 0.8f}},
+            // {"road-minnesota",       {0.2f, 0.4f, 0.6f, 0.8f}},
             // {"road-usroads-48",      {0.4f, 0.6f, 0.8f}},
-             {"road-belgium-osm",     {0.6f, 0.8f}},
-            // {"road-germany-osm",     {0.6f, 0.8f}},
+            // {"road-belgium-osm",     {0.6f, 0.8f}},
+             {"road-germany-osm",     {0.6f, 0.8f}},
             // {"road-great-britain-osm", {0.6f, 0.8f}},
             // {"road-italy-osm",       {0.6f, 0.8f}},
             // {"road-netherlands-osm", {0.6f, 0.8f}},
