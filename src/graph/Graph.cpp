@@ -49,20 +49,17 @@ Graph Graph::from_mtx(const std::string &path, bool weighted, bool directed) {
     AdjMap adj;
 
     if (is_edges) {
-        // .edges format: no header, just "u v" pairs, may have # comments, 1-indexed or 0-indexed
         while (std::getline(in, line)) {
             if (line.empty() || line[0] == '#' || line[0] == '%') continue;
             std::istringstream iss(line);
             uint32_t u, v;
             if (!(iss >> u >> v)) continue;
-            // assume 1-indexed like mtx
             u--; v--;
             adj[u].push_back({v, 1});
             if (!directed && u != v)
                 adj[v].push_back({u, 1});
         }
     } else {
-        // .mtx format: skip comment lines starting with %, first non-comment line is header
         while (std::getline(in, line)) {
             if (!line.empty() && line[0] != '%') break;
         }
@@ -93,7 +90,6 @@ Graph Graph::from_mtx(const std::string &path, bool weighted, bool directed) {
 
     auto g = Graph(adj, false);
 
-    // count edges: each undirected edge stored twice in adj
     uint32_t edge_count = 0;
     uint32_t max_id = 0;
     for (const auto& [u, edges] : adj) {
@@ -181,6 +177,40 @@ void Graph::populate_buckets_min_fill() {
     min_bucket_hint = 0;
 }
 
+// ── MIN NEIGHBOR DEGREE ──────────────────────────────────────────────────────
+//
+// Score = sum of current degrees of all alive neighbors.
+// Prefer vertices sitting in structurally simpler (low-degree) neighborhoods.
+//
+// Update strategy: 1-hop only (direct neighbors of eliminated vertex).
+// 2-hop neighbors have slightly stale scores but the effect is small on sparse
+// road networks (avg degree ~3). This keeps per-step update cost at O(d)
+// instead of O(d^2), which is necessary for million-node graphs.
+
+uint32_t Graph::get_neighbor_degree_score(uint32_t v) {
+    uint32_t score = 0;
+    for (const auto& [u, w] : adj.at(v)) {
+        score += static_cast<uint32_t>(adj.at(u).size());
+    }
+    return score;
+}
+
+void Graph::populate_buckets_min_neighbor_degree() {
+    for (const auto &[u, edges] : adj) {
+        uint32_t score = get_neighbor_degree_score(u);
+
+        // scores grow as fill edges are added during elimination — resize if needed
+        if (score >= buckets.size()) buckets.resize(score + 1);
+
+        buckets[score].push_back(u);
+        bucket_position[u] = std::prev(buckets[score].end());
+        heuristic_vals[u] = score;
+    }
+    min_bucket_hint = 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 std::vector<uint32_t> Graph::get_hybrid_order(float alpha) const {
     auto* self = const_cast<Graph*>(this);
 
@@ -222,15 +252,12 @@ std::vector<uint32_t> Graph::get_hybrid_order(float alpha) const {
 
 void Graph::populate_buckets_hybrid(float alpha) {
     hybrid_alpha = alpha;
-    // populate edge_set and weight_map
     for (const auto &[u, edges] : adj) {
         for (const auto& [to, w] : edges) {
             add_edge_cache(u, to, w);
         }
     }
 
-    // large graphs: skip fill (O(V*degree^2) is too slow; fill≈0 on sparse road networks anyway)
-    // small graphs: seed buckets with hybrid score for fill-guided initial priority
     const bool use_fill = (adj.size() <= 200000);
 
     if (use_fill) {
@@ -259,7 +286,6 @@ void Graph::populate_buckets_hybrid(float alpha) {
             heuristic_vals[u] = bucket;
         }
     } else {
-        // pure degree seeding for large graphs — same as min-degree but adaptive
         for (const auto& [u, edges] : adj) {
             uint32_t bucket = (uint32_t)edges.size();
             buckets[bucket].push_back(u);
@@ -293,7 +319,7 @@ uint32_t Graph::get_fill(uint32_t v) {
     return fill;
 }
 
-void Graph::eliminate_vertex(const uint32_t v, bool /*is_min_degree*/) {
+void Graph::eliminate_vertex(const uint32_t v, bool is_min_degree) {
     const auto& neighbors = get_neighbors(v);
 
     // fills in edges w/ updated weights
@@ -315,7 +341,6 @@ void Graph::eliminate_vertex(const uint32_t v, bool /*is_min_degree*/) {
                 add_edge_cache(w, u, uvw_weight);
 
             } else if (uvw_weight < get_edge_weight(u, w)) {
-                // shorter path found — update weight_map in O(1)
                 const uint64_t key_uw = (static_cast<uint64_t>(u) << 32) | static_cast<uint64_t>(w);
                 const uint64_t key_wu = (static_cast<uint64_t>(w) << 32) | static_cast<uint64_t>(u);
                 weight_map[key_uw] = uvw_weight;
@@ -342,25 +367,45 @@ void Graph::eliminate_vertex(const uint32_t v, bool /*is_min_degree*/) {
     adj.erase(v);
     num_vertices -= 1;
 
-    // updates bucket value of neighbors after edge fill-in (only when using bucket-based heuristics)
+    // updates bucket value of neighbors after edge fill-in
     if (!heuristic_vals.empty()) {
-        for (uint32_t neighbor : neighbors) {
-            const uint32_t d1 = heuristic_vals[neighbor];
-            uint32_t d2;
+        if (use_min_neighbor_degree) {
+            // MND 1-hop update: only direct neighbors of v need recomputing.
+            // 2-hop neighbors have slightly stale scores but the approximation
+            // is close on sparse road networks and keeps runtime O(d) per step.
+            for (uint32_t u : neighbors) {
+                if (!adj.count(u)) continue;
 
-            if (hybrid_alpha > 0.0f && hybrid_alpha < 1.0f) {
-                // hybrid: update by degree only (O(1)) — buckets are raw degree values
-                d2 = adj.at(neighbor).size();
-            } else {
-                // min-fill: recompute fill
-                d2 = get_fill(neighbor);
+                uint32_t old_score = heuristic_vals[u];
+                uint32_t new_score = get_neighbor_degree_score(u);
+                if (old_score == new_score) continue;
+
+                // resize bucket array if score exceeds current size
+                if (new_score >= buckets.size()) buckets.resize(new_score + 1);
+
+                buckets[old_score].erase(bucket_position[u]);
+                buckets[new_score].push_front(u);
+                bucket_position[u] = buckets[new_score].begin();
+                heuristic_vals[u] = new_score;
+                if (new_score < min_bucket_hint) min_bucket_hint = new_score;
             }
+        } else {
+            for (uint32_t neighbor : neighbors) {
+                const uint32_t d1 = heuristic_vals[neighbor];
+                uint32_t d2;
 
-            buckets[d1].erase(bucket_position[neighbor]);
-            buckets[d2].push_front(neighbor);
-            bucket_position[neighbor] = buckets[d2].begin();
-            heuristic_vals[neighbor] = d2;
-            if (d2 < min_bucket_hint) min_bucket_hint = d2;
+                if (is_min_degree || (hybrid_alpha > 0.0f && hybrid_alpha < 1.0f)) {
+                    d2 = adj.at(neighbor).size();
+                } else {
+                    d2 = get_fill(neighbor);
+                }
+
+                buckets[d1].erase(bucket_position[neighbor]);
+                buckets[d2].push_front(neighbor);
+                bucket_position[neighbor] = buckets[d2].begin();
+                heuristic_vals[neighbor] = d2;
+                if (d2 < min_bucket_hint) min_bucket_hint = d2;
+            }
         }
     }
 }
@@ -388,8 +433,6 @@ uint32_t Graph::pop_next_vertex() {
 
 bool Graph::edge_exists(const uint32_t u, const uint32_t v) const {
     if (!weighted_graph) {
-        // unweighted: scan adj directly — saves ~1GB of edge_set memory
-        // avg degree ~2 on road networks so this is O(1) in practice
         auto it = adj.find(u);
         if (it == adj.end()) return false;
         for (const Edge& e : it->second) {
@@ -403,14 +446,12 @@ bool Graph::edge_exists(const uint32_t u, const uint32_t v) const {
 
 uint32_t Graph::get_edge_weight(const uint32_t u, const uint32_t v) const {
     if (u == v) return 0;
-    // for unweighted graphs, just check edge_set — avoids weight_map memory overhead
     if (!weighted_graph) {
         return edge_exists(u, v) ? 1 : UINT32_MAX;
     }
     const uint64_t key = (static_cast<uint64_t>(u) << 32) | static_cast<uint64_t>(v);
     auto it = weight_map.find(key);
     if (it != weight_map.end()) return it->second;
-    // fallback: scan adj
     auto ait = adj.find(u);
     if (ait != adj.end()) {
         for (const Edge& e : ait->second) {
@@ -426,7 +467,6 @@ void Graph::add_edge_cache(const uint32_t u, const uint32_t v, const uint32_t w)
         edge_set.insert(edge_cache);
         weight_map[edge_cache] = w;
     }
-    // unweighted: skip edge_set entirely — edge_exists scans adj directly
 }
 
 void Graph::remove_edge_cache(const uint32_t u, const uint32_t v) {
@@ -435,7 +475,6 @@ void Graph::remove_edge_cache(const uint32_t u, const uint32_t v) {
         edge_set.erase(edge_cache);
         weight_map.erase(edge_cache);
     }
-    // unweighted: nothing to do — edge_exists uses adj directly
 }
 
 // Lexicographic BFS
@@ -523,6 +562,7 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
     h.max_vertex_id = max_vertex_id;
     h.hybrid_alpha = 0.0f;
     h.weighted_graph = weighted_graph;
+    h.use_min_neighbor_degree = false;
 
     const auto adj_size = max_vertex_id + 1;
 
@@ -540,6 +580,9 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
         h.populate_buckets();
     } else if (heuristic == Heuristic::HYBRID) {
         h.populate_buckets_hybrid(alpha);
+    } else if (heuristic == Heuristic::MIN_NEIGHBOR_DEGREE) {
+        h.use_min_neighbor_degree = true;
+        h.populate_buckets_min_neighbor_degree();
     } else {
         // LEX_BFS: populate edge_set only
         for (const auto& [u, edges] : adj) {
@@ -551,7 +594,7 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
 
     h.td_bag_edges.resize(adj_size);
 
-    std::vector<uint32_t> ordering(adj_size, UINT32_MAX); // indexed by compact ID
+    std::vector<uint32_t> ordering(adj_size, UINT32_MAX);
     parent_map.assign(adj_size, UINT32_MAX);
 
     td_bag_edges.resize(adj_size);
@@ -578,21 +621,15 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
             if (i % static_cast<int>(adj.size() / 10) == 0)
                 std::cout << "Eliminated vertex " << i << " " << 10 * i / static_cast<int>(adj.size() / 10) << "%" << std::endl;
         }
-    } else if (heuristic == Heuristic::HYBRID) {
-        for (size_t i = 0; i < adj.size(); i++) {
-            uint32_t v = h.pop_next_vertex();
-            td_bags[v] = h.get_star(v);
-            h.eliminate_vertex(v, false);
-            ordering[v] = i;
-
-            if (i % static_cast<int>(adj.size() / 10) == 0)
-                std::cout << "Eliminated vertex " << i << " " << 10 * i / static_cast<int>(adj.size() / 10) << "%" << std::endl;
-        }
     } else {
+        // MIN_DEGREE, MIN_FILL, HYBRID, MIN_NEIGHBOR_DEGREE all use pop_next_vertex()
+        // Pass is_min_degree=true only for MIN_DEGREE so bucket updates use degree not fill
+        const bool is_min_degree = (heuristic == Heuristic::MIN_DEGREE);
+
         for (size_t i = 0; i < adj.size(); i++) {
             uint32_t v = h.pop_next_vertex();
             td_bags[v] = h.get_star(v);
-            h.eliminate_vertex(v, false);
+            h.eliminate_vertex(v, is_min_degree);
             ordering[v] = i;
 
             if (i % static_cast<int>(adj.size() / 10) == 0)
