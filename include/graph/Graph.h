@@ -16,6 +16,9 @@ class Graph {
 
 public:
 
+    uint32_t td_root = 1e9;
+    std::vector<std::vector<uint32_t>> td_adj;
+
     using AdjMap = std::unordered_map<uint32_t, std::vector<Edge>>;
 
     using TreeDecompAdj = std::vector<std::vector<uint32_t>>; // matrix of edges in TD. key denotes bag root v, edge to bag root u
@@ -47,7 +50,8 @@ public:
         return (2.0 * num_edges) / num_vertices;
     }
 
-    enum class Heuristic { MIN_DEGREE, MIN_FILL, LEX_BFS, HYBRID };
+    // ── Heuristics ──────────────────────────────────────────────────────────
+    enum class Heuristic { MIN_DEGREE, MIN_FILL, LEX_BFS, HYBRID, MIN_NEIGHBOR_DEGREE };
 
     // returns adj, bags, root of tree decomposition
     std::tuple<TreeDecompAdj, TreeDecompBags, uint32_t> get_td(Heuristic h = Heuristic::MIN_FILL, float alpha = 0.5f);
@@ -63,8 +67,10 @@ public:
     void populate_buckets();
     void populate_buckets_min_fill();
     void populate_buckets_hybrid(float alpha);
+    void populate_buckets_min_neighbor_degree();   // ← NEW
     void clear_buckets();
     uint32_t get_fill(uint32_t u);
+    uint32_t get_neighbor_degree_score(uint32_t v); // ← NEW
 
     [[nodiscard]] bool edge_exists(uint32_t u, uint32_t v) const;
     [[nodiscard]] uint32_t pop_next_vertex();
@@ -84,6 +90,7 @@ public:
     // Produces better elimination orderings than MCS on non-chordal graphs.
     [[nodiscard]] std::vector<uint32_t> lex_bfs() const;
     [[nodiscard]] std::vector<uint32_t> get_hybrid_order(float alpha) const;
+
     uint32_t num_vertices = 0;
     uint32_t num_edges = 0;
     uint32_t max_vertex_id = 0;
@@ -92,12 +99,12 @@ public:
     float norm_max_deg  = 1.0f;
     float norm_max_fill = 1.0f;
     uint32_t min_bucket_hint = 0;
-    bool weighted_graph = false;  // if false, weight_map is skipped to save memory
+    bool weighted_graph = false;
+    bool use_min_neighbor_degree = false;  // ← NEW: flag for MND bucket updates
 
 private:
     AdjMap adj{};
-    
-    TreeDecompAdj td_adj;
+
     TreeDecompBags td_bags;
 
     TreeDecompBagEdges td_bag_edges;
@@ -105,7 +112,7 @@ private:
 
     std::vector<uint32_t> parent_map;
 
-    uint32_t td_root = 1e9;
+
     size_t treeheight = 0;
 
     float avg_degree = 0.0f;
@@ -119,7 +126,7 @@ private:
     std::vector<std::list<uint32_t>> buckets;
     std::vector<uint32_t> heuristic_vals;
     std::vector<std::list<uint32_t>::iterator> bucket_position;
-    std::vector<uint32_t> fill_count; // incremental fill count per vertex for hybrid
+    std::vector<uint32_t> fill_count;
 
     static uint32_t index_of(const std::vector<uint32_t>&, uint32_t v);
 
