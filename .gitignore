@@ -15,6 +15,7 @@ mtx/road-roadNet-PA.mtx
 mtx/road-great-britain-osm.mtx
 mtx/road-netherlands-osm.mtx
 mtx/road-italy-osm.mtx
+mtx/*
 
 cmake-build-debug
 

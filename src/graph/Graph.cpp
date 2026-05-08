@@ -35,14 +35,12 @@ Graph::Graph(AdjMap adj, bool populate_buckets) : adj(std::move(adj)) {
     }
 }
 
-// This method generated with Claude Sonnet 4.5
 Graph Graph::from_mtx(const std::string &path, bool weighted, bool directed) {
     std::ifstream in(path);
     if (!in.is_open()) {
         throw std::runtime_error("Could not open file " + path);
     }
 
-    // detect format by extension
     bool is_edges = path.size() >= 6 && path.substr(path.size() - 6) == ".edges";
 
     std::string line;
@@ -177,16 +175,6 @@ void Graph::populate_buckets_min_fill() {
     min_bucket_hint = 0;
 }
 
-// ── MIN NEIGHBOR DEGREE ──────────────────────────────────────────────────────
-//
-// Score = sum of current degrees of all alive neighbors.
-// Prefer vertices sitting in structurally simpler (low-degree) neighborhoods.
-//
-// Update strategy: 1-hop only (direct neighbors of eliminated vertex).
-// 2-hop neighbors have slightly stale scores but the effect is small on sparse
-// road networks (avg degree ~3). This keeps per-step update cost at O(d)
-// instead of O(d^2), which is necessary for million-node graphs.
-
 uint32_t Graph::get_neighbor_degree_score(uint32_t v) {
     uint32_t score = 0;
     for (const auto& [u, w] : adj.at(v)) {
@@ -199,7 +187,6 @@ void Graph::populate_buckets_min_neighbor_degree() {
     for (const auto &[u, edges] : adj) {
         uint32_t score = get_neighbor_degree_score(u);
 
-        // scores grow as fill edges are added during elimination — resize if needed
         if (score >= buckets.size()) buckets.resize(score + 1);
 
         buckets[score].push_back(u);
@@ -208,8 +195,6 @@ void Graph::populate_buckets_min_neighbor_degree() {
     }
     min_bucket_hint = 0;
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
 
 std::vector<uint32_t> Graph::get_hybrid_order(float alpha) const {
     auto* self = const_cast<Graph*>(this);
@@ -370,9 +355,6 @@ void Graph::eliminate_vertex(const uint32_t v, bool is_min_degree) {
     // updates bucket value of neighbors after edge fill-in
     if (!heuristic_vals.empty()) {
         if (use_min_neighbor_degree) {
-            // MND 1-hop update: only direct neighbors of v need recomputing.
-            // 2-hop neighbors have slightly stale scores but the approximation
-            // is close on sparse road networks and keeps runtime O(d) per step.
             for (uint32_t u : neighbors) {
                 if (!adj.count(u)) continue;
 
@@ -477,7 +459,6 @@ void Graph::remove_edge_cache(const uint32_t u, const uint32_t v) {
     }
 }
 
-// Lexicographic BFS
 std::vector<uint32_t> Graph::lex_bfs() const {
     const size_t n = max_vertex_id + 1;
     const size_t num_verts = adj.size();
@@ -622,8 +603,7 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
                 std::cout << "Eliminated vertex " << i << " " << 10 * i / static_cast<int>(adj.size() / 10) << "%" << std::endl;
         }
     } else {
-        // MIN_DEGREE, MIN_FILL, HYBRID, MIN_NEIGHBOR_DEGREE all use pop_next_vertex()
-        // Pass is_min_degree=true only for MIN_DEGREE so bucket updates use degree not fill
+
         const bool is_min_degree = (heuristic == Heuristic::MIN_DEGREE);
 
         for (size_t i = 0; i < adj.size(); i++) {
@@ -704,7 +684,7 @@ std::tuple<Graph::TreeDecompAdj, Graph::TreeDecompBags, uint32_t> Graph::get_td(
         }
     }
 
-    // free temporary structures to reduce peak memory
+    
     { TreeDecompBagEdges tmp; h.td_bag_edges.swap(tmp); }
     td_bag_edges.clear(); td_bag_edges.shrink_to_fit();
     td_weights.clear(); td_weights.shrink_to_fit();
